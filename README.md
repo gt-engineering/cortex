@@ -44,26 +44,17 @@ containers. Optional local configuration can be copied from
 
 ## CI/CD
 
-Pull requests run validation and build both Docker images without publishing.
-A passing push to `main` publishes immutable `linux/amd64` images:
+Pull requests validate the affected Turborepo package graph and build affected
+Docker images without publishing. A passing push to `main` publishes only the
+affected `linux/amd64` images:
 
 - `ghcr.io/gena-tokarev/cortex-auth-api`
 - `ghcr.io/gena-tokarev/cortex-web`
 
-The workflow then commits both image digests atomically to
-`gena-tokarev/infra` at `environments/development/cortex/release.yaml`. Argo CD
-detects that Git commit and reconciles k3s. GitHub Actions has no VPS, SSH,
-Kubernetes, or Argo CD credentials.
-
-The GitHub `development` environment requires:
-
-```text
-Variable: INFRA_APP_CLIENT_ID
-Secret:   INFRA_APP_PRIVATE_KEY
-```
-
-These belong to a narrowly scoped GitHub App installed only on the private
-`infra` repository with repository contents read/write permission.
+Each image receives an immutable `sha-<commit>` tag and the movable `main` tag.
+Argo CD Image Updater resolves `main` to an immutable digest and commits changed
+service references to `gena-tokarev/infra`. Argo CD then reconciles k3s. GitHub
+Actions has no infra, VPS, SSH, Kubernetes, or Argo CD credentials.
 
 The development site is `https://cortex-dev.podolog-warsaw.pl`. Runtime
 secrets are provisioned from the Ansible Vault in the private infra repository;
@@ -74,6 +65,7 @@ Health endpoints:
 - `GET /api/health/live` checks only that the API process is alive.
 - `GET /api/health` checks PostgreSQL and Redis readiness.
 
-Rollback is performed by reverting the corresponding release commit in the
-infra repository. Database migrations are not reversed and must remain
-backward-compatible with the preceding application version.
+Before reverting a development release, pause that image's updater rule so it
+does not immediately select the same `main` digest again. Database migrations
+are not reversed and must remain backward-compatible with the preceding
+application version.

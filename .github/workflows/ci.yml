@@ -9,19 +9,31 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cortex-${{ github.workflow }}-${{ github.ref }}
+  # Cancelling a main run can lose an image when the following commit only
+  # changes an unrelated package. Serialize main; cancel superseded PR runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   AUTH_API_IMAGE: ghcr.io/gena-tokarev/cortex-auth-api
   WEB_IMAGE: ghcr.io/gena-tokarev/cortex-web
 
 jobs:
-  ci:
-    name: Validate
+  validate:
+    name: Validate affected packages
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      auth_api: ${{ steps.affected.outputs.auth_api }}
+      auth_e2e: ${{ steps.affected.outputs.auth_e2e }}
+      web: ${{ steps.affected.outputs.web }}
     steps:
-      - name: Check out repository
+      - name: Check out repository with history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -31,24 +43,35 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Detect affected applications
+        id: affected
+        run: |
+          set -euo pipefail
+          affected_file="$RUNNER_TEMP/cortex-affected.json"
+          bunx turbo ls --affected --output=json > "$affected_file"
+
+          has_package() {
+            jq -r --arg package "$1" \
+              'any(.packages.items[]?; .name == $package)' "$affected_file"
+          }
+
+          echo "auth_api=$(has_package '@cortex/auth-api')" >> "$GITHUB_OUTPUT"
+          echo "auth_e2e=$(has_package '@cortex/auth-api-e2e')" >> "$GITHUB_OUTPUT"
+          echo "web=$(has_package '@cortex/web')" >> "$GITHUB_OUTPUT"
+
+          jq -r '.packages.items[].name' "$affected_file"
+
       - name: Generate Prisma client
+        if: steps.affected.outputs.auth_api == 'true' || steps.affected.outputs.auth_e2e == 'true'
         run: bun run db:generate
 
-      - name: Lint
-        run: bun run lint
-
-      - name: Run unit tests
-        run: bun run test
-
-      - name: Build applications
-        run: bun run build
-
-      - name: Run end-to-end tests
-        run: bun run e2e
+      - name: Lint, test, and build affected packages
+        run: bunx turbo run lint test build e2e --affected
 
   build-auth-api:
     name: Build auth API image
-    needs: ci
+    if: needs.validate.outputs.auth_api == 'true'
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -56,8 +79,6 @@ jobs:
       packages: write
       attestations: write
       id-token: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,7 +101,7 @@ jobs:
           images: ${{ env.AUTH_API_IMAGE }}
           tags: |
             type=sha,format=long,prefix=sha-
-            type=raw,value=development,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.title=Cortex Auth API
             org.opencontainers.image.description=Cortex authentication API
@@ -110,7 +131,8 @@ jobs:
 
   build-web:
     name: Build web image
-    needs: ci
+    if: needs.validate.outputs.web == 'true'
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -118,8 +140,6 @@ jobs:
       packages: write
       attestations: write
       id-token: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,7 +162,7 @@ jobs:
           images: ${{ env.WEB_IMAGE }}
           tags: |
             type=sha,format=long,prefix=sha-
-            type=raw,value=development,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.title=Cortex Web
             org.opencontainers.image.description=Cortex web application
@@ -169,107 +189,3 @@ jobs:
           subject-name: ${{ env.WEB_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-
-  promote-development:
-    name: Promote development release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs:
-      - build-auth-api
-      - build-web
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: development
-      url: https://cortex-dev.podolog-warsaw.pl
-    concurrency:
-      group: cortex-development-promotion
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    steps:
-      - name: Check whether this is still main
-        id: currency
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          fetch-depth: 1
-
-      - name: Decide whether to promote
-        id: decision
-        env:
-          RELEASE_SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          current_sha=$(git rev-parse HEAD)
-          if [ "$current_sha" = "$RELEASE_SHA" ]; then
-            echo "promote=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Skipping stale release $RELEASE_SHA; main is $current_sha."
-            echo "promote=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create infra repository token
-        if: steps.decision.outputs.promote == 'true'
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ vars.INFRA_APP_CLIENT_ID }}
-          private-key: ${{ secrets.INFRA_APP_PRIVATE_KEY }}
-          owner: gena-tokarev
-          repositories: infra
-          permission-contents: write
-
-      - name: Check out infra repository
-        if: steps.decision.outputs.promote == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: gena-tokarev/infra
-          ref: main
-          token: ${{ steps.app-token.outputs.token }}
-          path: infra
-          persist-credentials: true
-
-      - name: Commit immutable release to infra
-        if: steps.decision.outputs.promote == 'true'
-        env:
-          AUTH_DIGEST: ${{ needs.build-auth-api.outputs.digest }}
-          WEB_DIGEST: ${{ needs.build-web.outputs.digest }}
-          RELEASE_SHA: ${{ github.sha }}
-        working-directory: infra
-        run: |
-          set -eu
-          printf '%s\n' "$AUTH_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
-          printf '%s\n' "$WEB_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
-
-          install -d environments/development/cortex
-          {
-            echo "sourceSha: \"$RELEASE_SHA\""
-            echo "authApi:"
-            echo "  image:"
-            echo "    repository: ghcr.io/gena-tokarev/cortex-auth-api"
-            echo "    digest: \"$AUTH_DIGEST\""
-            echo "web:"
-            echo "  image:"
-            echo "    repository: ghcr.io/gena-tokarev/cortex-web"
-            echo "    digest: \"$WEB_DIGEST\""
-          } > environments/development/cortex/release.yaml
-
-          git config user.name "${{ steps.app-token.outputs.app-slug }}[bot]"
-          git config user.email "41898282+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
-          git add environments/development/cortex/release.yaml
-          if git diff --cached --quiet; then
-            echo "Infra already contains this release."
-            exit 0
-          fi
-          git commit -m "deploy(cortex): $RELEASE_SHA"
-
-          attempts=0
-          until git push origin HEAD:main; do
-            attempts=$((attempts + 1))
-            if [ "$attempts" -ge 5 ]; then
-              echo "Unable to promote after $attempts attempts." >&2
-              exit 1
-            fi
-            git fetch origin main
-            git rebase origin/main
-          done
