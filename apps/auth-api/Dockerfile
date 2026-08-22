@@ -30,6 +30,8 @@ FROM node:22-alpine AS runner
 
 WORKDIR /app
 
+LABEL org.opencontainers.image.source="https://github.com/gt-engineering/cortex"
+
 ENV NODE_ENV=production
 ENV PORT=3001
 

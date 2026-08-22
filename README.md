@@ -48,12 +48,12 @@ Pull requests validate the affected Turborepo package graph and build affected
 Docker images without publishing. A passing push to `main` publishes only the
 affected `linux/amd64` images:
 
-- `ghcr.io/gena-tokarev/cortex-auth-api`
-- `ghcr.io/gena-tokarev/cortex-web`
+- `ghcr.io/gt-engineering/cortex-auth-api`
+- `ghcr.io/gt-engineering/cortex-web`
 
 Each image receives an immutable `sha-<commit>` tag and the movable `main` tag.
 Argo CD Image Updater resolves `main` to an immutable digest and commits changed
-service references to `gena-tokarev/infra`. Argo CD then reconciles k3s. GitHub
+service references to `gt-engineering/infra`. Argo CD then reconciles k3s. GitHub
 Actions has no infra, VPS, SSH, Kubernetes, or Argo CD credentials.
 
 The development site is `https://cortex-dev.podolog-warsaw.pl`. Runtime

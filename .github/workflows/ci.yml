@@ -17,8 +17,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  AUTH_API_IMAGE: ghcr.io/gena-tokarev/cortex-auth-api
-  WEB_IMAGE: ghcr.io/gena-tokarev/cortex-web
+  AUTH_API_IMAGE: ghcr.io/${{ github.repository_owner }}/cortex-auth-api
+  WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/cortex-web
 
 jobs:
   validate:
